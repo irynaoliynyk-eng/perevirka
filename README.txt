@@ -6,6 +6,7 @@
   index.html                          – сторінка (HTML, CSS і JS всередині, вбудовані зображення)
   informatsiia-dlia-eksponenta.pdf    – документ, кнопка «для експонента»
   informatsiia-dlia-menedzhera.pdf    – документ, кнопка «для менеджера»
+  katalog-obladnannia.pdf             – каталог обладнання, кнопка «обладнання»
   lib/pdf.min.js, lib/pdf.worker.min.js – pdf.js 3.11.174 (превʼю PDF/AI)
   lib/UTIF.js                         – UTIF 3.1.0 (превʼю TIFF)
   lib/pako.min.js                     – pako 2.1.0 (розпакування для UTIF)
