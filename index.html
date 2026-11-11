@@ -274,7 +274,7 @@ async function inspect(file){
   if(b(0)===0x89&&b(1)===0x50)return inspectPng(file,info);
   if(b(0)===0x25&&b(1)===0x50&&b(2)===0x44&&b(3)===0x46)return inspectPdf(file,info);
   if(b(0)===0x50&&b(1)===0x4B&&/\.cdr$/i.test(info.name))return inspectCdr(file,info);
-  if(b(0)===0x52&&b(1)===0x49&&b(2)===0x46&&b(3)===0x46&&b(8)===0x43&&b(9)===0x44&&b(10)===0x52){info.format='CDR';info.kind='ps';info.color='?';return info}
+  if(b(0)===0x52&&b(1)===0x49&&b(2)===0x46&&b(3)===0x46&&b(8)===0x43&&b(9)===0x44&&b(10)===0x52){info.format='CDR';info.kind='ps';info.color='?';info.cdrOld=true;return info}
   if((b(0)===0x25&&b(1)===0x21)||(b(0)===0xC5&&b(1)===0xD0&&b(2)===0xD3&&b(3)===0xC6)){info.format=/\.ai$/i.test(info.name)?'AI':'EPS';info.kind='ps';info.color='?';return info}
   if(b(0)===0x38&&b(1)===0x42&&b(2)===0x50&&b(3)===0x53)return inspectPsd(file,info);
   if((b(0)===0x49&&b(1)===0x49)||(b(0)===0x4D&&b(1)===0x4D))return inspectTiff(file,info);
@@ -298,33 +298,45 @@ async function inspectCdr(file,info){
     const get=async n=>{const z=ent[n];if(!z)return null;const lh=await rdr(file)(z.lo,30);const st=z.lo+30+lh.getUint16(26,true)+lh.getUint16(28,true);
       let d=new Uint8Array(await file.slice(st,st+z.csz).arrayBuffer());
       if(z.meth===8)d=new Uint8Array(await new Response(new Blob([d]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());return d};
-    const md=await get('metadata/metadata.xml');
+    // старі версії CorelDRAW: metadata/…, нові (2020+): META-INF/… і previews/…
+    const md=await get('metadata/metadata.xml')||await get('META-INF/metadata.xml');
     if(md){
       const x=new TextDecoder().decode(md);
-      const tag=(n,src=x)=>{const m=new RegExp('<'+n+'>([^<]*)</'+n+'>').exec(src);return m?m[1].trim():null};
-      const block=n=>{const m=new RegExp('<'+n+'>([\\s\\S]*?)</'+n+'>').exec(x);return m?m[1]:''};
+      const P='(?:[\\w-]+:)?';
+      const tag=(n,src=x)=>{const m=new RegExp('<'+P+n+'(?:\\s[^>]*)?>([^<]*)</'+P+n+'>').exec(src);return m?m[1].trim():null};
+      const block=n=>{const m=new RegExp('<'+P+n+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+P+n+'>').exec(x);return m?m[1]:''};
+      const blocks=n=>[...x.matchAll(new RegExp('<'+P+n+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+P+n+'>','g'))].map(m=>m[1]).join('');
       const lis=src=>[...src.matchAll(/<rdf:li>([^<]*)<\/rdf:li>/g)].map(m=>m[1].trim()).filter(Boolean);
       const pw=+tag('PageWidth'),ph=+tag('PageHeight');
       if(pw>0&&ph>0){info.mmW=Math.round(pw/1e4*10)/10;info.mmH=Math.round(ph/1e4*10)/10}
-      const crt=/<ClipRect\b[^>]*>/.exec(x),ca=n=>{const m=crt&&new RegExp('\\b'+n+'="(-?[\\d.]+)"').exec(crt[0]);return m?+m[1]:NaN};
+      const crt=/<(?:[\w-]+:)?ClipRect\b[^>]*>/.exec(x),ca=n=>{const m=crt&&new RegExp('\\b'+n+'="(-?[\\d.]+)"').exec(crt[0]);return m?+m[1]:NaN};
       const cr=crt&&[ca('left'),ca('top'),ca('right'),ca('bottom')].every(Number.isFinite);
       if(cr&&pw>0&&ph>0){const l=ca('left'),tp=ca('top'),r=ca('right'),bt=ca('bottom'),cw=(r-l)/1e4,chh=(tp-bt)/1e4,tol=1e4;
         const beyond=l<-pw/2-tol||r>pw/2+tol||tp>ph/2+tol||bt<-ph/2-tol;
-        const pageEl=ELS.some(e=>Math.abs(e.w-info.mmW)<=4&&Math.abs(e.h-info.mmH)<=4);
+        const nomW=[500,1000,2000,3000],nomH=[400,1000,1500,2500],np0=+tag('NumPages')||1;
+        const pageEl=ELS.some(e=>Math.abs(e.w-info.mmW)<=4&&Math.abs(e.h-info.mmH)<=4)||(nomW.some(v=>Math.abs(v-info.mmW)<=4)&&nomH.some(v=>Math.abs(v-info.mmH)<=4))||(np0>1&&!beyond);
         if(cw>5&&chh>5&&(beyond||(!pageEl&&(Math.abs(cw-info.mmW)/info.mmW>0.02||Math.abs(chh-info.mmH)/info.mmH>0.02)))){info.pageMm=[info.mmW,info.mmH];info.mmW=Math.round(cw*10)/10;info.mmH=Math.round(chh*10)/10;info.cdrClip=true}}
       const np=+tag('NumPages');if(np>0)info.pages=np;
       info.cdrVer=tag('ProductName');
       const obj=block('Objects');info.bitmaps=+(tag('Bitmap',obj)||0);info.textObjs=+(tag('Text',obj)||0);
       info.linked=lis(block('LinkPaths')).length;
       const fonts=lis(block('FontsUsed'));info.fontNames=fonts;
-      const cols=new Set([...lis(block('Fills')),...lis(block('Outlines'))].filter(c=>/^(RGB|CMYK|Grayscale|Gray)/i.test(c)).map(c=>c.toUpperCase().replace(/\d+$/,'')));
-      info.spot=lis(block('SpotColors')).length;
+      const cols=new Set([...lis(block('Fills')),...lis(block('Outlines')),...lis(blocks('Colors'))].filter(c=>/^(RGB|CMYK|Grayscale|Gray)/i.test(c)).map(c=>c.toUpperCase().replace(/\d+$/,'')));
+      info.spotNames=[...new Set(lis(blocks('SpotColors')))];info.spot=info.spotNames.length;
       const rgb=cols.has('RGB'),cmyk=cols.has('CMYK'),gray=cols.has('GRAYSCALE')||cols.has('GRAY');
       info.color=rgb&&cmyk?'mixed':rgb?'RGB':cmyk?'CMYK':gray?'Gray':'?';
     }
     const order=info.cdrClip?['thumbnail.png','thumbnail.bmp','page1.png','page1.bmp']:['page1.png','page1.bmp','thumbnail.png','thumbnail.bmp'];
-    const tn=order.map(n=>'metadata/thumbnails/'+n).find(n=>ent[n]);
-    if(tn){const d=await get(tn);info.thumb=new Blob([d],{type:/png$/i.test(tn)?'image/png':'image/bmp'})}
+    const tn=order.flatMap(n=>['metadata/thumbnails/'+n,'previews/'+n]).find(n=>ent[n]);
+    const blobOf=async n=>new Blob([await get(n)],{type:/png$/i.test(n)?'image/png':'image/bmp'});
+    if(tn)info.thumb=await blobOf(tn);
+    // мініатюри всіх сторінок і їх назви (для перегляду сторінок)
+    if((info.pages||1)>1&&!info.cdrClip){
+      const names={};const ct=await get('META-INF/container.xml');
+      if(ct){for(const m of new TextDecoder().decode(ct).matchAll(/crl:caption="[^"]*?\[(\d+):\s*([^\]]*)\]/g))names[+m[1]]=m[2].trim()}
+      const th=[];for(let k=1;k<=info.pages;k++){const n=['previews/page'+k+'.png','metadata/thumbnails/page'+k+'.bmp','metadata/thumbnails/page'+k+'.png'].find(n=>ent[n]);if(!n){th.length=0;break}th.push({n,name:names[k]||''})}
+      if(th.length){info.cdrPages=th;info.cdrGet=n=>blobOf(n)}
+    }
     if(info.color==='?'){const cx=await get('color/color.xml');if(cx){const x=new TextDecoder().decode(cx);const r=/<HasRgbObjects>true/i.test(x),c=/<HasCmykObjects>true/i.test(x);info.color=r&&c?'mixed':r?'RGB':c?'CMYK':'?'}}
   }catch(e){}
   return info;
@@ -482,7 +494,7 @@ const cntRe=(s,re,lim=Infinity)=>{let n=0,m;re.lastIndex=0;while((m=re.exec(s)))
 const colorOps=(s,lim)=>({rgb:cntRe(s,/(?:-?[\d.]+\s+){3}(?:rg|RG)(?=[\s\/\[])/g,lim),cmyk:cntRe(s,/(?:-?[\d.]+\s+){4}(?:k|K)(?=[\s\/\[])/g,lim)});
 async function inspectPdf(file,info){
   info.format=/\.ai$/i.test(info.name)?'AI':'PDF'; info.kind='vector'; info.pdf=true;
-  const A={media:[],trim:[],uu:1,rgb:0,cmyk:0,icc3:0,icc4:0,imgs:[],fd:0,ff:0,pages:0};
+  const A={spot:new Set(),media:[],trim:[],uu:1,rgb:0,cmyk:0,icc3:0,icc4:0,imgs:[],fd:0,ff:0,pages:0};
   const streams=[];
   const scan=(s,base,collect,lim=Infinity)=>{
     let m;
@@ -491,6 +503,7 @@ async function inspectPdf(file,info){
     const uu=/\/UserUnit\s+([\d.]+)/.exec(s); if(uu)A.uu=+uu[1]||1;
     A.rgb+=cntRe(s,/(?<!\/CS\s{0,3})\/DeviceRGB/g,lim);
     A.cmyk+=cntRe(s,/\/DeviceCMYK/g,lim);
+    {const rs=/\/Separation\s*\/((?:PANTONE|Pantone)[^\s\/\[\]<>()]*)/g;let q;while((q=rs.exec(s))){if(q.index<lim)A.spot.add(q[1].replace(/#([0-9a-fA-F]{2})/g,(_,h)=>String.fromCharCode(parseInt(h,16))))}}
     const re=/<<[^<>]{0,300}?\/N\s+([34])\b[^<>]{0,300}?>>\s*stream/g;
     while((m=re.exec(s))){if(m.index>=lim)continue;if(/\/OutputIntent/.test(s.slice(Math.max(0,m.index-300),m.index)))continue; m[1]==='4'?A.icc4++:A.icc3++}
     A.fd+=cntRe(s,/\/Type\s*\/FontDescriptor/g,lim);
@@ -557,6 +570,7 @@ async function inspectPdf(file,info){
     if(A.trim.length&&mb){const bw=Math.round(Math.abs(mb[2]-mb[0])*k);info.bleed=Math.max(0,Math.round((bw-info.mmW)/2))}
   }
   info.pages=A.pages||1;
+  info.spotNames=[...A.spot];
   info.fontsMissing=Math.max(0,A.fd-A.ff);
   info.fonts=A.fd;
   const big=A.imgs.sort((a,b)=>b.w*b.h-a.w*a.h)[0];
@@ -626,6 +640,7 @@ function evaluate(info){
   }
   // формат
   if(info.format==='TIFF')add('ok','Формат файлу','TIFF','.tif');
+  else if(info.cdrOld)add('bad','Формат файлу','Старий формат CorelDRAW (X3 і раніше) – файл не відкривається. Потрібен TIFF або PDF.','CDR (старий)','Файл збережено в старому форматі CorelDRAW, ми не можемо його відкрити. Будь ласка, надішліть макет у TIFF або PDF.');
   else add('warn','Формат файлу',`${info.format} – приймаємо. Бажано TIFF для швидшого опрацювання.`,info.format,`Макет надіслано у форматі ${info.format}. Ми переведемо його в TIFF самостійно, але бажано надсилати одразу TIFF – так ми швидше опрацюємо макет.`,true);
   // колір
   if(info.color==='CMYK')add('ok','Режим кольору','CMYK','CMYK');
@@ -634,7 +649,7 @@ function evaluate(info){
   else if(info.color==='Gray')add('warn','Режим кольору','Відтінки сірого. Друкувати можна, але перевірте, чи так задумано.','Grayscale');
   else add('warn','Режим кольору','Не вдалося визначити – StandPoint перевірить вручну.','?');
   const t=target(info);
-  if(info.kind==='ps'&&!(info.format==='CDR'&&info.mmW)){if(info.format==='CDR')add('warn','Розмір і якість',`Файл CorelDRAW – сторінка не може прочитати з нього розмір, кольори й шрифти. StandPoint перевірить вручну.${info.thumb?' Превʼю – мініатюра з файлу.':''}`,'вручну');else add('warn','Розмір і якість',`${info.format} у старому форматі (без PDF-сумісності) – сторінка не може прочитати розмір і кольори. StandPoint перевірить вручну.`,'?','Файл збережено без PDF-сумісності, тому ми перевіримо його вручну. Надалі, будь ласка, надсилайте TIFF.');
+  if(info.kind==='ps'&&!(info.format==='CDR'&&info.mmW)){if(info.format==='CDR')add('warn','Розмір і якість',info.cdrOld?'Старий формат CorelDRAW (X3 і раніше) – сторінка не може його прочитати. StandPoint перевірить вручну.':`Файл CorelDRAW – сторінка не може прочитати з нього розмір, кольори й шрифти. StandPoint перевірить вручну.${info.thumb?' Превʼю – мініатюра з файлу.':''}`,'вручну');else add('warn','Розмір і якість',`${info.format} у старому форматі (без PDF-сумісності) – сторінка не може прочитати розмір і кольори. StandPoint перевірить вручну.`,'?','Файл збережено без PDF-сумісності, тому ми перевіримо його вручну. Надалі, будь ласка, надсилайте TIFF.');
     if(!t)add('bad','Елемент стенду',ELSEL.v==='auto'?'Не вдалося визначити, для якого елемента файл. Знаєте – оберіть зі списку; ні – файл не приймається, уточніть в експонента.':'Вкажіть ширину і висоту в мм.','?','Не зрозуміло, для якого елемента стенду цей макет, тому його не прийнято. Вкажіть, будь ласка, номер стенду і елемент (наприклад, панель 964×2394 мм) або підготуйте файл точно під розмір елемента.');
   }
   else if(info.pdf||info.format==='CDR')evalPdf(info,t,add);else evalRaster(info,t,add);
@@ -689,6 +704,7 @@ function evalRaster(info,t,add){
 
 function evalPdf(info,t,add){
   if(info.pages>1)add('warn','Сторінки',multiNote(info.pages,'pages'),`${info.pages} стор.`,'multi');
+  if(info.spotNames&&info.spotNames.length){const sn=info.spotNames.slice(0,4).join(', ')+(info.spotNames.length>4?'…':'');add('warn','Кольори PANTONE',`У макеті є кольори PANTONE (${sn}) – при друку їх буде переведено в CMYK, відтінок може трохи відрізнятися.`,`${info.spotNames.length} PANTONE`,`У макеті є кольори PANTONE (${sn}) – друк у CMYK, тому відтінок може трохи відрізнятися. Якщо колір важливий – вкажіть, будь ласка, CMYK-значення.`)}
   if(info.format==='CDR'&&info.textObjs)add('warn','Шрифти',`Текст не переведено в криві (текстових обʼєктів: ${info.textObjs}${info.fontNames&&info.fontNames.length?`, шрифти: ${info.fontNames.slice(0,4).join(', ')}`:''}) – без потрібного шрифту текст може замінитися.`,'не в кривих');
   else if(info.format==='CDR')add('ok','Шрифти','Живого тексту немає – усе в кривих','–');
   if(info.fonts&&info.fontsMissing)add('warn','Шрифти',`${info.fontsMissing} з ${info.fonts} шрифтів не вбудовано – текст може замінитися іншим шрифтом.`,'не вбудовані','Шрифти в PDF не вбудовані. Переведіть, будь ласка, текст у криві або збережіть PDF з вбудованими шрифтами.');
@@ -806,8 +822,9 @@ function pdfWorker(){ // на сайті – обробка у фоні (worker 
   })());
 }
 const TIFF16_HI=buf=>1; // після UTIF.decodeImage дані 16 біт – little-endian (перевірено тестом)
-async function pdfPage(it,n){ // інші сторінки PDF – рендер на вимогу, з кешем
+async function pdfPage(it,n){ // інші сторінки PDF/CDR – на вимогу, з кешем
   it._pg=it._pg||{}; if(it._pg[n])return it._pg[n];
+  if(it.info.cdrPages)return it._pg[n]=await bitmapPreview(await it.info.cdrGet(it.info.cdrPages[n-1].n));
   await loadScript(PDFJS_SRC); await pdfWorker();
   if(!it._doc)it._doc=await pdfjsLib.getDocument({data:new Uint8Array(await it.file.arrayBuffer()),isEvalSupported:false}).promise;
   it.info.pages=it._doc.numPages;
@@ -1031,7 +1048,7 @@ function result(it){
 function shortFix(c,it,t){
   const info=it.info;
   switch(c.name){
-    case 'Формат файлу':if(info.format==='CDR')return'Формат CDR – бажано TIFF (або PDF), так ми швидше опрацюємо макет.';return c.s==='bad'?'Файл не відкривається – надішліть, будь ласка, у форматі TIFF.':`Формат ${info.format} – бажано TIFF.`;
+    case 'Формат файлу':if(info.cdrOld)return'Файл у старому форматі CorelDRAW не відкривається – надішліть, будь ласка, TIFF або PDF.';if(info.format==='CDR')return'Формат CDR – бажано TIFF (або PDF), так ми швидше опрацюємо макет.';return c.s==='bad'?'Файл не відкривається – надішліть, будь ласка, у форматі TIFF.':`Формат ${info.format} – бажано TIFF.`;
     case 'Режим кольору':return'Кольори в RGB – бажано CMYK (при переведенні кольори можуть трохи змінитися).';
     case 'Компресія':return'TIFF бажано зберігати зі стисненням LZW.';
     case 'Прозорість':return'Прозорий фон – потрібно залити фон кольором.';
@@ -1049,6 +1066,7 @@ function shortFix(c,it,t){
     case 'Масштаб 1:1':return t?`Масштаб не 1:1 – бажано ${t.w}×${t.h} мм.`:c.fix;
     case 'Сторінки':return multiFix(info.pages,'pages');
     case 'Шрифти':return'Шрифти не вбудовані – бажано перевести текст у криві.';
+    case 'Кольори PANTONE':return`У макеті є кольори PANTONE (${(info.spotNames||[]).slice(0,4).join(', ')}) – друк у CMYK, тому відтінок може трохи відрізнятися. Якщо колір важливий – вкажіть, будь ласка, CMYK-значення.`;
     case 'Якість фото':return info.img?`Фото в макеті може бути замалим (${fmt(info.img.w)}×${fmt(info.img.h)} px).`:c.fix;
     case 'Текст біля краю':return'Можливо, текст або лого близько до краю – якщо так, бажано відсунути, щоб не зайшло під профіль чи люверси.';
     case 'Кілька макетів в одному файлі':return multiFix(it.multi.segs.length,'layouts');
@@ -1291,7 +1309,7 @@ function render(){
   if(!elShow&&pvMode==='element')pvMode='file';
   it._small=isBad;
   const pvBlock=showPv?`<div class="pv">${elShow?`<div class="pvtabs" role="tablist"><button type="button" role="tab" data-pv="file" aria-selected="${pvMode==='file'}">Файл</button><button type="button" role="tab" data-pv="element" aria-selected="${pvMode==='element'}">На елементі</button></div>`:''}
-      ${!elShow&&!isBad&&!it.multi&&!r.logo&&it.preview?(it.el.v==='auto'&&!(r.t&&r.t.banner)?`<p class="hint">Щоб побачити макет на елементі, ${r.t?'підтвердіть елемент вище':'оберіть елемент стенду'}.</p>`:''):''}${it.info&&it.info.pdf&&it.info.pages>1&&it.preview?`<div class="pgnav"><button type="button" data-pg="-1" aria-label="Попередня сторінка" ${(it.page||1)<=1?'disabled':''}>‹</button><span>Сторінка <b>${it.page||1}</b> з ${it.info.pages}</span><button type="button" data-pg="1" aria-label="Наступна сторінка" ${(it.page||1)>=it.info.pages?'disabled':''}>›</button></div>`:''}<div class="pvstage ${isBad?'small':''}"><canvas id="pv" role="img" aria-label="Превʼю макета"></canvas></div>
+      ${!elShow&&!isBad&&!it.multi&&!r.logo&&it.preview?(it.el.v==='auto'&&!(r.t&&r.t.banner)?`<p class="hint">Щоб побачити макет на елементі, ${r.t?'підтвердіть елемент вище':'оберіть елемент стенду'}.</p>`:''):''}${it.info&&(it.info.pdf||it.info.cdrPages)&&it.info.pages>1&&it.preview?`<div class="pgnav"><button type="button" data-pg="-1" aria-label="Попередня сторінка" ${(it.page||1)<=1?'disabled':''}>‹</button><span>Сторінка <b>${it.page||1}</b> з ${it.info.pages}${it.info.cdrPages&&it.info.cdrPages[(it.page||1)-1].name?` · ${esc(it.info.cdrPages[(it.page||1)-1].name)}`:''}</span><button type="button" data-pg="1" aria-label="Наступна сторінка" ${(it.page||1)>=it.info.pages?'disabled':''}>›</button></div>`:''}<div class="pvstage ${isBad?'small':''}"><canvas id="pv" role="img" aria-label="Превʼю макета"></canvas></div>
       ${pvMode==='element'&&elShow?'<p class="disclaimer">Це приблизне зображення, створене автоматично для наочності. Не оцінюйте за ним розміри, центрування чи відступи – для цього є перевірки вище.</p>':''}
       <div class="pvcap">${pvMode==='element'&&elShow?elCap(it,r):it.multi?'цифрами позначено окремі макети у файлі':it.analysis?(it.analysis.uniform?(it.analysis.hazards.length?'червоним – можливо, елементи близько до краю':'біля країв чисто'):'фон до краю – перевірте візуально'):''}</div></div>`:'';
   html+=`
@@ -1371,7 +1389,7 @@ async function processQueue(){
     if(it.info.format==='помилка'||it.info.format==='невідомий'){it.pstate='fail';it.preason='файл не прочитано'}
     else{
       it.pstate='loading';
-      try{const r=await buildPreview(it.file,it.info);if(r.reason){it.pstate='fail';it.preason=r.reason}else{it.preview=r;it.pstate='ok';if(it.info.pdf){it._pg={1:r};it.page=1}try{const m=detectMulti(r,fileMm(it.info));it.multi=m&&m.conf==='high'?m:null;it.multiMaybe=m&&m.conf!=='high'?m:null}catch(e){it.multi=null}try{it.info.multiLike=!!it.multi;it.info.logoLike=!it.multi&&detectLogo(r)}catch(e){}}}
+      try{const r=await buildPreview(it.file,it.info);if(r.reason){it.pstate='fail';it.preason=r.reason}else{it.preview=r;it.pstate='ok';if(it.info.pdf||it.info.cdrPages){it._pg={1:r};it.page=1}try{const m=detectMulti(r,fileMm(it.info));it.multi=m&&m.conf==='high'?m:null;it.multiMaybe=m&&m.conf!=='high'?m:null}catch(e){it.multi=null}try{it.info.multiLike=!!it.multi;it.info.logoLike=!it.multi&&detectLogo(r)}catch(e){}}}
       catch(e){it.pstate='fail';it.preason=e&&e.message==='lib'?'немає доступу до бібліотеки превʼю (потрібен інтернет)':'не вдалося побудувати превʼю цього файлу'}
     }
     setProg(100);
