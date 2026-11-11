@@ -178,6 +178,10 @@ tr.grp td{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var
 .fhead{display:flex;justify-content:space-between;align-items:center;gap:12px}.linkbtn{font:inherit;font-size:12px;font-weight:600;color:var(--muted);background:none;border:0;padding:4px 0;cursor:pointer}.linkbtn:hover{color:var(--fg)}
 .secttl{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0}
 .pvtabs{display:flex;gap:6px;justify-self:start}
+.pgnav{display:flex;align-items:center;gap:10px;justify-self:center;font-size:14px}
+.pgnav button{width:34px;height:34px;padding:0;border-radius:999px;border:1px solid var(--fg);background:transparent;color:var(--fg);font-size:20px;line-height:1;cursor:pointer}
+.pgnav button:disabled{opacity:.3;cursor:default}
+.pgnav span{min-width:120px;text-align:center}
 .pvtabs button{background:transparent;color:var(--fg);font-size:14px;font-weight:600;border:1px solid var(--fg);padding:5px 14px}
 .pvtabs button[aria-selected="true"]{background:var(--orange);border-color:var(--orange);color:#fff}
 .pvtabs button:disabled{opacity:.35;cursor:not-allowed}
@@ -597,7 +601,7 @@ function target(info){
 
 const COLOR_FIX='Кольори у файлі в RGB. Для друку ми переведемо їх у CMYK, і вони можуть трохи змінитися – найпомітніше на яскравих синіх, зелених і помаранчевих відтінках. Щоб кольори були точно як задумано, надішліть макет у CMYK.';
 
-function isLogo(info){const v=ELSEL.v;if(v==='logo')return true;if(v!=='auto'||info.multiLike)return false;const t=target(info);if(t&&t.banner)return /(logo|лого)/i.test(info.name||'');if(t&&!t.approx)return !!(info.logoLike&&t.h!==294);return !!(info.logoLike||/(logo|лого)/i.test(info.name||''))}
+function isLogo(info){const v=ELSEL.v;if(v==='logo')return true;if(v!=='auto'||info.multiLike)return false;if(info.pages>1&&!/(logo|лого)/i.test(info.name||''))return false;const t=target(info);if(t&&t.banner)return /(logo|лого)/i.test(info.name||'');if(t&&!t.approx)return !!(info.logoLike&&t.h!==294);return !!(info.logoLike||/(logo|лого)/i.test(info.name||''))}
 function evaluate(info){
   const C=[];
   const add=(s,name,note,val,fix,speed)=>C.push({s,name,note,val,fix,speed});
@@ -802,6 +806,18 @@ function pdfWorker(){ // на сайті – обробка у фоні (worker 
   })());
 }
 const TIFF16_HI=buf=>1; // після UTIF.decodeImage дані 16 біт – little-endian (перевірено тестом)
+async function pdfPage(it,n){ // інші сторінки PDF – рендер на вимогу, з кешем
+  it._pg=it._pg||{}; if(it._pg[n])return it._pg[n];
+  await loadScript(PDFJS_SRC); await pdfWorker();
+  if(!it._doc)it._doc=await pdfjsLib.getDocument({data:new Uint8Array(await it.file.arrayBuffer()),isEvalSupported:false}).promise;
+  it.info.pages=it._doc.numPages;
+  const page=await it._doc.getPage(Math.min(n,it._doc.numPages));
+  const v1=page.getViewport({scale:1}), sc=MAXP/Math.max(v1.width,v1.height), vp=page.getViewport({scale:sc});
+  const c=document.createElement('canvas');c.width=Math.round(vp.width);c.height=Math.round(vp.height);
+  const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);
+  await page.render({canvasContext:g,viewport:vp}).promise;
+  return it._pg[n]={canvas:c,img:g.getImageData(0,0,c.width,c.height)};
+}
 async function pdfPreview(file){
   await loadScript(PDFJS_SRC); await pdfWorker(); setProg(20);
   const data=new Uint8Array(await file.arrayBuffer()); setProg(35);
@@ -978,7 +994,7 @@ function safeCheck(it,t){
   if(it.pstate==='fail'||!it.preview)return{s:'warn',name:n,note:`Не перевірено автоматично: ${it.preason}. Перевірте вручну.`,val:'вручну'};
   const phys=physFor(it.info,t);
   if(!phys)return{s:'warn',name:n,note:'Невідомий розмір у мм – оберіть елемент стенду.',val:'–'};
-  const key=`${phys.w}x${phys.h}|${s}`;
+  const key=`${phys.w}x${phys.h}|${s}|${it.page||1}`;
   if(it.akey!==key){try{it.analysis=analyze(it.preview,phys,s,it.info.bleed||0)}catch(e){it.analysis=null}it.akey=key}
   const a=it.analysis; if(!a)return{s:'warn',name:n,note:'Не вдалося проаналізувати краї. Перевірте вручну.',val:'вручну'};
   if(a.uniform){
@@ -1275,7 +1291,7 @@ function render(){
   if(!elShow&&pvMode==='element')pvMode='file';
   it._small=isBad;
   const pvBlock=showPv?`<div class="pv">${elShow?`<div class="pvtabs" role="tablist"><button type="button" role="tab" data-pv="file" aria-selected="${pvMode==='file'}">Файл</button><button type="button" role="tab" data-pv="element" aria-selected="${pvMode==='element'}">На елементі</button></div>`:''}
-      ${!elShow&&!isBad&&!it.multi&&!r.logo&&it.preview?(it.el.v==='auto'&&!(r.t&&r.t.banner)?`<p class="hint">Щоб побачити макет на елементі, ${r.t?'підтвердіть елемент вище':'оберіть елемент стенду'}.</p>`:''):''}<div class="pvstage ${isBad?'small':''}"><canvas id="pv" role="img" aria-label="Превʼю макета"></canvas></div>
+      ${!elShow&&!isBad&&!it.multi&&!r.logo&&it.preview?(it.el.v==='auto'&&!(r.t&&r.t.banner)?`<p class="hint">Щоб побачити макет на елементі, ${r.t?'підтвердіть елемент вище':'оберіть елемент стенду'}.</p>`:''):''}${it.info&&it.info.pdf&&it.info.pages>1&&it.preview?`<div class="pgnav"><button type="button" data-pg="-1" aria-label="Попередня сторінка" ${(it.page||1)<=1?'disabled':''}>‹</button><span>Сторінка <b>${it.page||1}</b> з ${it.info.pages}</span><button type="button" data-pg="1" aria-label="Наступна сторінка" ${(it.page||1)>=it.info.pages?'disabled':''}>›</button></div>`:''}<div class="pvstage ${isBad?'small':''}"><canvas id="pv" role="img" aria-label="Превʼю макета"></canvas></div>
       ${pvMode==='element'&&elShow?'<p class="disclaimer">Це приблизне зображення, створене автоматично для наочності. Не оцінюйте за ним розміри, центрування чи відступи – для цього є перевірки вище.</p>':''}
       <div class="pvcap">${pvMode==='element'&&elShow?elCap(it,r):it.multi?'цифрами позначено окремі макети у файлі':it.analysis?(it.analysis.uniform?(it.analysis.hazards.length?'червоним – можливо, елементи близько до краю':'біля країв чисто'):'фон до краю – перевірте візуально'):''}</div></div>`:'';
   html+=`
@@ -1287,6 +1303,12 @@ function render(){
   document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{const v=b.dataset.pick;if(v==='banner'){const mm=fileMm(it.info);it.el.v='custom';it.el.cw=Math.round(mm[0]);it.el.ch=Math.round(mm[1])}else it.el.v=v;syncControls();render()});
   if(showPv){if(pvMode==='element'&&elShow)drawMock(it,r,mockOf(it));else drawPreview(it,r)}
   document.querySelectorAll('[data-pv]').forEach(b=>b.onclick=()=>{if(b.disabled)return;pvMode=b.dataset.pv;render()});
+  document.querySelectorAll('[data-pg]').forEach(b=>b.onclick=async()=>{
+    const n=Math.max(1,Math.min(it.info.pages,(it.page||1)+ +b.dataset.pg)); if(n===(it.page||1))return;
+    const sp=b.parentElement.querySelector('span'); if(sp)sp.textContent='Завантажується…';
+    document.querySelectorAll('[data-pg]').forEach(x=>x.disabled=true);
+    try{it.preview=await pdfPage(it,n);it.page=n}catch(e){}
+    render()});
   const t=r.t;
   const lgo=it.info&&withItem(it,()=>isLogo(it.info));
   const tl=lgo?withItem(it,()=>target(it.info)):null;
@@ -1349,7 +1371,7 @@ async function processQueue(){
     if(it.info.format==='помилка'||it.info.format==='невідомий'){it.pstate='fail';it.preason='файл не прочитано'}
     else{
       it.pstate='loading';
-      try{const r=await buildPreview(it.file,it.info);if(r.reason){it.pstate='fail';it.preason=r.reason}else{it.preview=r;it.pstate='ok';try{const m=detectMulti(r,fileMm(it.info));it.multi=m&&m.conf==='high'?m:null;it.multiMaybe=m&&m.conf!=='high'?m:null}catch(e){it.multi=null}try{it.info.multiLike=!!it.multi;it.info.logoLike=!it.multi&&detectLogo(r)}catch(e){}}}
+      try{const r=await buildPreview(it.file,it.info);if(r.reason){it.pstate='fail';it.preason=r.reason}else{it.preview=r;it.pstate='ok';if(it.info.pdf){it._pg={1:r};it.page=1}try{const m=detectMulti(r,fileMm(it.info));it.multi=m&&m.conf==='high'?m:null;it.multiMaybe=m&&m.conf!=='high'?m:null}catch(e){it.multi=null}try{it.info.multiLike=!!it.multi;it.info.logoLike=!it.multi&&detectLogo(r)}catch(e){}}}
       catch(e){it.pstate='fail';it.preason=e&&e.message==='lib'?'немає доступу до бібліотеки превʼю (потрібен інтернет)':'не вдалося побудувати превʼю цього файлу'}
     }
     setProg(100);
